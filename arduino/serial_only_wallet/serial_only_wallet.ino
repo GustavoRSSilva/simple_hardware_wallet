@@ -1,11 +1,14 @@
 // bitcoin library
 #include <Bitcoin.h>
+#include <Hash.h>
 
 // SD card libs
 #include <SPI.h>
 #include <SD.h>
 
-// private key
+// root key (master)
+HDPrivateKey rootKey;
+// account key (m/44'/1'/0'/)
 HDPrivateKey hd;
 
 // set to false to use on mainnet
@@ -13,6 +16,41 @@ HDPrivateKey hd;
 
 void show(String msg, bool done=true){
     Serial.println(msg);
+}
+
+// uses last bit of the analogRead values
+// to generate a random byte
+byte getRandomByte(int analogInput = A0){
+    byte val = 0;
+    for(int i = 0; i < 8; i++){
+        int init = analogRead(analogInput);
+        int count = 0;
+        // waiting for analog value to change
+        while(analogRead(analogInput) == init){
+            ++count;
+        }
+        // if we've got a new value right away 
+        // use last bit of the ADC
+        if (count == 0) { 
+            val = (val << 1) | (init & 0x01);
+        } else { // if not, use last bit of count
+            val = (val << 1) | (count & 0x01);
+        }
+    }
+}
+
+HDPrivateKey getRandomKey(int analogInput = A0){
+    byte seed[64];
+    // fill seed with random bytes
+    for(int i=0; i<sizeof(seed); i++){
+        seed[i] = getRandomByte(analogInput);
+    }
+    // increase randomness by applying sha512
+    // seed -> sha512(seed)
+    sha512(seed, sizeof(seed), seed);
+    HDPrivateKey key;
+    key.fromSeed(seed, sizeof(seed), USE_TESTNET);
+    return key;
 }
 
 bool requestTransactionSignature(Transaction tx){
@@ -101,10 +139,6 @@ void sign_tx(char * cmd){
 
 void load_xprv(){
     show("Loading private key");
-    if (!SD.begin(4)){
-        Serial.println("error: no SD card");
-        return;
-    }
     // open the file. note that only one file can be open at a time,
     // so you have to close this one before opening another.
     File file = SD.open("xprv.txt");
@@ -122,9 +156,10 @@ void load_xprv(){
         HDPrivateKey imported_hd(xprv_buf);
         if(imported_hd){ // check if parsing was successfull
             Serial.println("success: private key loaded");
+            rootKey = imported_hd;
             // we will use bip44: m/44'/coin'/0' 
             // coin = 1 for testnet, 0 for mainnet
-            hd = imported_hd.hardenedChild(44).hardenedChild(USE_TESTNET).hardenedChild(0);
+            hd = rootKey.hardenedChild(44).hardenedChild(USE_TESTNET).hardenedChild(0);
             Serial.println(hd.xpub()); // print xpub to serial
         }else{
             Serial.println("error: can't parse xprv.txt");
@@ -140,6 +175,15 @@ void get_address(char * cmd, bool change=false){
     String addr = hd.child(change).child(index).address();
     Serial.println(addr);
     show(addr);
+}
+
+void generate_key(){
+    show("Generating new key...");
+    rootKey = getRandomKey();
+    hd = rootKey.hardenedChild(44).hardenedChild(USE_TESTNET).hardenedChild(0);
+    show(hd);
+    Serial.println("success: random key generated");
+    Serial.println(hd.xpub());
 }
 
 void parseCommand(char * cmd){
@@ -163,6 +207,10 @@ void parseCommand(char * cmd){
         get_address(cmd + strlen("changeaddr"), true);
         return;
     }
+    if(memcmp(cmd, "generate_key", strlen("generate_key"))==0){
+        generate_key();
+        return;
+    }
     Serial.println("error: unknown command");
 }
 
@@ -171,6 +219,10 @@ void setup() {
     // serial connection
     Serial.begin(9600);
     // loading master private key
+    if (!SD.begin(4)){
+        Serial.println("error: no SD card controller on pin 4");
+        return;
+    }
     load_xprv();
     while(!Serial){
         ; // wait for serial port to open
